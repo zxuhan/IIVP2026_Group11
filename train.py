@@ -24,6 +24,10 @@ TEST_DIR = DATA_DIR / "test" / "test"
 IMG_SIZE = 32
 BATCH_SIZE = 128
 VAL_FRACTION = 0.10
+EPOCHS = 10
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+CKPT_PATH = DATA_DIR / "best_model.pt"
 
 
 def set_seed(seed: int) -> None:
@@ -127,6 +131,41 @@ def build_loaders(device: torch.device):
     return full, train_loader, val_loader
 
 
+@torch.no_grad()
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[float, float]:
+    model.eval()
+    loss_sum = 0.0
+    correct = 0
+    total = 0
+    loss_fn = nn.CrossEntropyLoss(reduction="sum")
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        logits = model(x)
+        loss_sum += loss_fn(logits, y).item()
+        correct += (logits.argmax(1) == y).sum().item()
+        total += y.size(0)
+    return loss_sum / total, correct / total
+
+
+def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer, loss_fn,
+                    device: torch.device) -> tuple[float, float]:
+    model.train()
+    loss_sum = 0.0
+    correct = 0
+    total = 0
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        logits = model(x)
+        loss = loss_fn(logits, y)
+        loss.backward()
+        optimizer.step()
+        loss_sum += loss.item() * y.size(0)
+        correct += (logits.argmax(1) == y).sum().item()
+        total += y.size(0)
+    return loss_sum / total, correct / total
+
+
 def main() -> None:
     set_seed(SEED)
     device = pick_device()
@@ -138,14 +177,29 @@ def main() -> None:
     counts = Counter(label for _, label in full.samples)
     print(f"per-class counts: {dict(sorted(counts.items()))}")
 
-    x, y = next(iter(train_loader))
-    print(f"batch tensor: {tuple(x.shape)}  dtype={x.dtype}  label sample: {y[:8].tolist()}")
-
     model = Net().to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    with torch.no_grad():
-        logits = model(x.to(device))
-    print(f"model params: {n_params:,}  forward output: {tuple(logits.shape)}")
+    print(f"model params: {n_params:,}")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    loss_fn = nn.CrossEntropyLoss()
+
+    best_val_acc = 0.0
+    for epoch in range(1, EPOCHS + 1):
+        tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
+        val_loss, val_acc = evaluate(model, val_loader, device)
+        scheduler.step()
+        lr_now = optimizer.param_groups[0]["lr"]
+        print(f"epoch {epoch:02d}/{EPOCHS}  lr={lr_now:.2e}  "
+              f"train loss={tr_loss:.4f} acc={tr_acc:.4f}  "
+              f"val loss={val_loss:.4f} acc={val_acc:.4f}")
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), CKPT_PATH)
+            print(f"  ↳ saved best checkpoint to {CKPT_PATH.name} (val acc={val_acc:.4f})")
+
+    print(f"best val accuracy: {best_val_acc:.4f}")
 
 
 if __name__ == "__main__":
