@@ -9,11 +9,14 @@ import random
 from collections import Counter
 from pathlib import Path
 
+import csv
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import datasets, transforms
 
 SEED = 42
@@ -28,6 +31,9 @@ EPOCHS = 10
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
 CKPT_PATH = DATA_DIR / "best_model.pt"
+TEST_CSV = DATA_DIR / "test.csv"
+SAMPLE_SUB = DATA_DIR / "sample_submission.csv"
+SUBMISSION_PATH = DATA_DIR / "submission.csv"
 
 
 def set_seed(seed: int) -> None:
@@ -64,6 +70,24 @@ def build_transforms() -> tuple[transforms.Compose, transforms.Compose]:
     return train_tf, eval_tf
 
 
+class TestDataset(Dataset):
+    """Loads test images in the order given by test.csv's Id column."""
+
+    def __init__(self, ids: list[int], img_dir: Path, transform: transforms.Compose):
+        self.ids = ids
+        self.img_dir = img_dir
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    def __getitem__(self, idx: int):
+        img_id = self.ids[idx]
+        with Image.open(self.img_dir / f"{img_id}.png") as im:
+            im = im.convert("L")
+            return self.transform(im), img_id
+
+
 class TransformSubset(torch.utils.data.Dataset):
     """Wraps a Subset and applies a transform at __getitem__ time.
 
@@ -79,7 +103,6 @@ class TransformSubset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         img, label = self.subset.dataset.samples[self.subset.indices[idx]]
-        from PIL import Image
         with Image.open(img) as im:
             im = im.convert("L")
             return self.transform(im), label
@@ -200,6 +223,41 @@ def main() -> None:
             print(f"  ↳ saved best checkpoint to {CKPT_PATH.name} (val acc={val_acc:.4f})")
 
     print(f"best val accuracy: {best_val_acc:.4f}")
+
+    # ---- Inference on test set --------------------------------------------------
+    model.load_state_dict(torch.load(CKPT_PATH, map_location=device))
+    model.eval()
+
+    test_ids = pd.read_csv(TEST_CSV)["Id"].tolist()
+    _, eval_tf = build_transforms()
+    test_ds = TestDataset(test_ids, TEST_DIR, eval_tf)
+    pin = device.type == "cuda"
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False,
+                             num_workers=2, pin_memory=pin)
+
+    predictions: dict[int, int] = {}
+    with torch.no_grad():
+        for x, ids in test_loader:
+            x = x.to(device)
+            preds = model(x).argmax(1).cpu().tolist()
+            for img_id, pred in zip(ids.tolist(), preds):
+                predictions[img_id] = pred
+
+    # Verify format matches sample_submission.csv and write in test.csv order.
+    with open(SAMPLE_SUB, newline="") as f:
+        sample_header = next(csv.reader(f))
+    assert sample_header == ["Id", "Category"], f"unexpected header: {sample_header}"
+
+    with open(SUBMISSION_PATH, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Id", "Category"])
+        for img_id in test_ids:
+            writer.writerow([img_id, predictions[img_id]])
+
+    assert len(predictions) == len(test_ids) == 3000, (
+        f"prediction count mismatch: {len(predictions)} preds, {len(test_ids)} ids"
+    )
+    print(f"wrote {SUBMISSION_PATH} ({len(test_ids)} rows)")
 
 
 if __name__ == "__main__":
