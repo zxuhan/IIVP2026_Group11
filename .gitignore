@@ -1,0 +1,19 @@
+# Data (not tracked — downloaded separately from Kaggle)
+train/
+test/
+train.csv
+test.csv
+sample_submission.csv
+submission.csv
+
+# Model checkpoints
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
